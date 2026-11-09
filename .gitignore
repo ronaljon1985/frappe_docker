@@ -1,6 +1,11 @@
 # Environment Variables
 .env
 
+# Low-memory deployment bundle runtime files
+deploy/lowmem-v16.54.0/secrets/
+deploy/lowmem-v16.54.0/state/
+deploy/lowmem-v16.54.0/backups/
+
 # mounted volume
 sites
 

@@ -1,0 +1,399 @@
+# Low-memory ERPNext stack for one existing Ubuntu host.
+# Pinned images, private MariaDB/Redis, HTTP published only on host port 80.
+# Host port 8080 is intentionally not used.
+
+name: erpnext-lowmem
+
+x-erpnext: &erpnext
+  image: frappe/erpnext:v16.54.0
+  pull_policy: never
+  platform: linux/amd64
+  init: true
+  logging: &json-logs
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-frappe-volumes: &frappe-volumes
+  - sites:/home/frappe/frappe-bench/sites
+  - logs:/home/frappe/frappe-bench/logs
+  - ./scripts:/opt/bundle-scripts:ro
+
+services:
+  db:
+    image: mariadb:11.8
+    pull_policy: never
+    platform: linux/amd64
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --innodb-snapshot-isolation=OFF
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./config/mariadb-lowmem.cnf:/etc/mysql/conf.d/z-lowmem.cnf:ro
+    secrets:
+      - source: db_root_password
+        target: db_root_password
+        mode: 0444
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 40s
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    mem_limit: 448m
+    memswap_limit: 704m
+    cpus: "1.00"
+    pids_limit: 256
+    oom_score_adj: 200
+    stop_grace_period: 30s
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    logging: *json-logs
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: db
+
+  redis-cache:
+    image: redis:8.6-alpine
+    pull_policy: never
+    platform: linux/amd64
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./secrets/redis-cache.conf:/usr/local/etc/redis/redis.conf:ro
+    secrets:
+      - source: redis_cache_password
+        target: redis_cache_password
+        mode: 0444
+    networks:
+      - data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_cache_password)\" redis-cli --no-auth-warning ping | grep -q PONG",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 64m
+    memswap_limit: 96m
+    cpus: "0.20"
+    pids_limit: 64
+    oom_score_adj: 200
+    logging: *json-logs
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: redis-cache
+
+  redis-queue:
+    image: redis:8.6-alpine
+    pull_policy: never
+    platform: linux/amd64
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - redis-queue-data:/data
+      - ./secrets/redis-queue.conf:/usr/local/etc/redis/redis.conf:ro
+    secrets:
+      - source: redis_queue_password
+        target: redis_queue_password
+        mode: 0444
+    networks:
+      - data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_queue_password)\" redis-cli --no-auth-warning ping | grep -q PONG",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    mem_limit: 128m
+    memswap_limit: 192m
+    cpus: "0.25"
+    pids_limit: 64
+    oom_score_adj: 200
+    logging: *json-logs
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: redis-queue
+
+  configurator:
+    <<: *erpnext
+    restart: "no"
+    tty: false
+    stdin_open: false
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["python3", "/opt/bundle-scripts/configure_site.py"]
+    environment:
+      MALLOC_ARENA_MAX: "2"
+    volumes: *frappe-volumes
+    secrets:
+      - source: redis_cache_password
+        target: redis_cache_password
+        mode: 0444
+      - source: redis_queue_password
+        target: redis_queue_password
+        mode: 0444
+    networks:
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    mem_limit: 384m
+    memswap_limit: 512m
+    cpus: "0.50"
+    pids_limit: 128
+    oom_score_adj: 300
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: configurator
+
+  create-site:
+    <<: *erpnext
+    restart: "no"
+    tty: false
+    stdin_open: false
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["bash", "/opt/bundle-scripts/create_site.sh"]
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      PYTHONUNBUFFERED: "1"
+    volumes: *frappe-volumes
+    secrets:
+      - source: db_root_password
+        target: db_root_password
+        mode: 0444
+      - source: admin_password
+        target: admin_password
+        mode: 0444
+    networks:
+      - data
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    mem_limit: 1536m
+    memswap_limit: 2560m
+    cpus: "1.50"
+    pids_limit: 512
+    oom_score_adj: 250
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: create-site
+
+  backend:
+    <<: *erpnext
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["bash", "/opt/bundle-scripts/run_backend.sh"]
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      GUNICORN_WORKERS: "1"
+      GUNICORN_THREADS: "2"
+      GUNICORN_TIMEOUT: "120"
+    volumes: *frappe-volumes
+    networks:
+      - data
+      - app
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo >/dev/tcp/127.0.0.1/8000"]
+      start_period: 20s
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    mem_limit: 320m
+    memswap_limit: 512m
+    cpus: "0.80"
+    pids_limit: 200
+    oom_score_adj: 500
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: backend
+
+  websocket:
+    <<: *erpnext
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["bash", "/opt/bundle-scripts/run_websocket.sh"]
+    environment:
+      NODE_OPTIONS: "--max-old-space-size=128"
+    volumes: *frappe-volumes
+    networks:
+      - data
+      - app
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo >/dev/tcp/127.0.0.1/9000"]
+      start_period: 20s
+      interval: 10s
+      timeout: 5s
+      retries: 18
+    mem_limit: 160m
+    memswap_limit: 224m
+    cpus: "0.30"
+    pids_limit: 128
+    oom_score_adj: 500
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: websocket
+
+  worker:
+    <<: *erpnext
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["bash", "/opt/bundle-scripts/run_worker.sh"]
+    environment:
+      MALLOC_ARENA_MAX: "2"
+    volumes: *frappe-volumes
+    networks:
+      - data
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    mem_limit: 256m
+    memswap_limit: 416m
+    cpus: "0.40"
+    pids_limit: 160
+    oom_score_adj: 650
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: worker
+
+  scheduler:
+    <<: *erpnext
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["bash", "/opt/bundle-scripts/run_scheduler.sh"]
+    environment:
+      MALLOC_ARENA_MAX: "2"
+    volumes: *frappe-volumes
+    networks:
+      - data
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    mem_limit: 192m
+    memswap_limit: 320m
+    cpus: "0.30"
+    pids_limit: 128
+    oom_score_adj: 600
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: scheduler
+
+  frontend:
+    <<: *erpnext
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["nginx-entrypoint.sh"]
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      NGINX_LISTEN_PORT: "8080"
+      FRAPPE_SITE_NAME_HEADER: frontend
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes: *frappe-volumes
+    networks:
+      - app
+    ports:
+      - "80:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+      websocket:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo >/dev/tcp/127.0.0.1/8080"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 48m
+    memswap_limit: 80m
+    cpus: "0.20"
+    pids_limit: 64
+    oom_score_adj: 400
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: frontend
+
+  restore:
+    <<: *erpnext
+    profiles: ["task"]
+    restart: "no"
+    tty: false
+    stdin_open: false
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["bash", "/opt/bundle-scripts/restore_site.sh"]
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      RESTORE_INBOX: /home/frappe/frappe-bench/sites/frontend/private/restore-inbox
+    volumes: *frappe-volumes
+    secrets:
+      - source: db_root_password
+        target: db_root_password
+        mode: 0444
+    networks:
+      - data
+    mem_limit: 1024m
+    memswap_limit: 1536m
+    cpus: "1.00"
+    pids_limit: 256
+    oom_score_adj: 300
+    labels:
+      com.bdks.stack: erpnext-lowmem
+      com.bdks.role: restore
+
+networks:
+  data:
+    name: erpnext-lowmem-data
+    internal: true
+  app:
+    name: erpnext-lowmem-app
+
+volumes:
+  db-data:
+    name: erpnext-lowmem-db-data
+  sites:
+    name: erpnext-lowmem-sites
+  logs:
+    name: erpnext-lowmem-logs
+  redis-queue-data:
+    name: erpnext-lowmem-redis-queue-data
+
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password
+  admin_password:
+    file: ./secrets/admin_password
+  redis_cache_password:
+    file: ./secrets/redis_cache_password
+  redis_queue_password:
+    file: ./secrets/redis_queue_password

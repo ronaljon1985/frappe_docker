@@ -1,0 +1,4 @@
+# Registry hosts reachable from the target server. Docker Hub is omitted.
+# library images are pulled as <host>/<repository> and <host>/<name>.
+mirror.ccs.tencentyun.com
+docker.m.daocloud.io

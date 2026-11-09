@@ -1,0 +1,9 @@
+# key local_ref repository tag index_digest amd64_manifest_digest
+# Upstream frappe_docker pins these tags in example.env, pwd.yml,
+# overrides/compose.mariadb.yaml and overrides/compose.redis.yaml.
+# Index digests were read from Docker Hub tag metadata and confirmed on
+# docker.m.daocloud.io on 2026-11-09. Accept either the index digest or the
+# linux/amd64 manifest digest after a mirror pull.
+erpnext frappe/erpnext:v16.54.0 frappe/erpnext v16.54.0 sha256:33f4d620dcd5858a2dffaa5337e43627b70408a19d94ff396bb0e5023d252dd9 sha256:4c80800a38a182fb940acfd0c280ac2bef3358422dcbec75c643cada578aa32b
+mariadb mariadb:11.8 library/mariadb 11.8 sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd sha256:8a4a99eff981d95c3ab12d019b82fe59725fb7761f1f9a5f155bc3f025528f4f
+redis redis:8.6-alpine library/redis 8.6-alpine sha256:c343030a535c8c2e430e038f25cca7cfa7497a2b290f12ba2f9003bdfb3086b9 sha256:560c2beb31bcae27bd07dd8579229eb31f38f44627bd9d6eb8debf005b50beb0
