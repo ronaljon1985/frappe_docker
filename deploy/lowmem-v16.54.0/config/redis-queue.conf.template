@@ -1,0 +1,13 @@
+bind 0.0.0.0
+protected-mode yes
+port 6379
+timeout 0
+tcp-keepalive 60
+dir /data
+maxmemory 64mb
+maxmemory-policy noeviction
+appendonly yes
+appendfsync everysec
+save 3600 1
+save 300 100
+requirepass __REDIS_PASSWORD__

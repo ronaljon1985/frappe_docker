@@ -1,0 +1,10 @@
+bind 0.0.0.0
+protected-mode yes
+port 6379
+timeout 300
+tcp-keepalive 60
+maxmemory 40mb
+maxmemory-policy allkeys-lru
+save ""
+appendonly no
+requirepass __REDIS_PASSWORD__

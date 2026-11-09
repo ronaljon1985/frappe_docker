@@ -1,0 +1,50 @@
+验证时间：2026-11-09（UTC）
+验证机：Ubuntu 24.04.5 LTS，x86_64，Docker 29.1.3，Compose 2.40.3+ds1-0ubuntu1~24.04.1
+内存：约 15 GiB，无 swap。不是目标上的 1.9 GiB + 2 GiB swap。
+systemd：PID 1 不是 systemd。生产检查用 ERP_BUNDLE_LAB=1 跳过，因此没有检查真实的 zhenbei-escort 单元。
+8080：独立进程返回 HTTP 200。脚本比对的是这个监听者，不是目标机上的 Node 服务。
+
+镜像（linux/amd64，索引摘要与 images.lock 一致）：
+- frappe/erpnext:v16.54.0  sha256:33f4d620dcd5858a2dffaa5337e43627b70408a19d94ff396bb0e5023d252dd9
+- mariadb:11.8            sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd
+  容器内版本：mariadbd 11.8.9-MariaDB-ubu2404
+- redis:8.6-alpine        sha256:c343030a535c8c2e430e038f25cca7cfa7497a2b290f12ba2f9003bdfb3086b9
+  容器内版本：Redis server 8.6.8
+本机从 mirror.ccs.tencentyun.com 拉取失败，随后 docker.m.daocloud.io 拉取成功并完成摘要核对。
+
+静态检查：
+- 在去掉 secrets、state、backups 的副本上执行 tests/validate_static.sh，通过。
+- 含 bash -n、shellcheck、Python 编译，以及渲染后的 Compose 契约。
+
+安装：
+- 8080 返回 000 时，apply.sh 在预检退出，没有继续创建业务容器。
+- 一次安装因 Compose 2.40 对未发布端口输出 “:0” 而中止。脚本只回滚本栈并保留数据卷，8080 基线不变。修正判断后再安装。
+- 成功的一次从 09:30:19 预检到 09:33:30 结束。站点 frontend。
+- bench list-apps：frappe 16.55.2，erpnext 16.54.0。
+- 调度器启用。bench doctor 通过。Socket.IO 轮询握手通过。Administrator 登录成功。
+- http://127.0.0.1/ 、/login 与 http://127.0.0.1:8080/ 均为 200。/api/method/ping 返回 pong。
+- 宿主只发布 80->容器 8080。3306、6379、443 没有宿主监听。
+- Redis 不带密码执行 ping，返回 NOAUTH。
+- 进程：gunicorn --workers=1 --threads=2；frappe worker --queue short,default,long；frappe schedule；node socketio.js。
+- 安装后空闲占用约：db 210/448 MiB，backend 139/320 MiB，websocket 89/160 MiB，worker 50/256 MiB，scheduler 43/192 MiB，redis-cache 8/64 MiB，redis-queue 7/128 MiB，frontend 5/48 MiB。
+
+备份与恢复（09:35:23 至 09:36:08）：
+- backup.sh 写出 database.sql.gz、site_config_backup.json、files.tar、private-files.tar 和 MANIFEST.txt。
+- 删除一个公开文件标记后，restore.sh 从该备份恢复。恢复后的文件内容与删除前一致。
+- restore.sh 自己的健康检查通过，登录通过，8080 仍为 200。
+
+隔离回滚（09:36:08 至 09:36:52）：
+- rollback.sh 不带 --purge-volumes。容器和两个网络删除，四个命名卷保留。
+- 回滚后 8080 仍为 200，宿主 80、3306、6379、443 都没有监听，本栈运行容器数为 0。
+- 用原数据卷重新启动 db、Redis 和应用层后，healthcheck.sh 通过，8080 仍为 200。
+- 09:38:22 执行 rollback.sh --purge-volumes 且不提供确认变量，退出码 1，提示需要 ERP_BUNDLE_PURGE_CONFIRM=erpnext-lowmem。当时 8 个本栈容器仍在运行，80 和 8080 仍为 200。没有执行带确认变量的删卷。
+
+重复建站（09:38:34）：
+- 再次运行 create-site。输出 “site frontend already has erpnext”，退出码 0。没有新建站点。80 和 8080 仍为 200。
+
+未验证：
+- Ubuntu 26.04、1.9 GiB 内存、2 GiB swap 上的安装与 OOM 行为。
+- 真实 systemd 单元 zhenbei-escort。
+- 目标机现场从 mirror.ccs.tencentyun.com 拉取。
+- HTTPS、域名、并发负载、打印和长时间队列。
+- 已确认的 --purge-volumes 删卷。
